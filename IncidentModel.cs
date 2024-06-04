@@ -4,6 +4,8 @@
     {
         public long PollNumber { get; set; }
 
+        public double AQI { get; set; }
+
         public double Min_PM10 { get; set; }
         public double Max_PM10 { get; set; }
         public double Avg_PM10 { get; set; }
@@ -73,6 +75,9 @@
         public double Max_Feelslike { get; set; }
         public double Avg_Feelslike { get; set; }
 
+        public string Area { get; set; }
+        public string City { get; set; }
+        public string State { get; set; }
 
         public DateTime StartTime {  get; set; }
         public DateTime EndTime {  get; set; }

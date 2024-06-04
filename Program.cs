@@ -26,9 +26,9 @@ namespace AQI_Consumer
                 using (var connection = new NpgsqlConnection(connectionString))
                 {
                     connection.Open();
+                    Console.WriteLine("Database Connection Successfull");
                     Aqi aqi = new Aqi();
-                    //aqi.checkConfiguration();
-                    await aqi.dataConsumer(config, configuration, connection);
+                    await aqi.start(config, configuration, connection);
                 }
 
                 Console.ReadKey();

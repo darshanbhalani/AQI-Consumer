@@ -3,22 +3,33 @@ using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
 using Npgsql;
 using NpgsqlTypes;
+using System.Data.Common;
 
 namespace AQI_Consumer
 {
     internal class Aqi
     {
-        private List<AqiModel> dataList = new List<AqiModel>();
-        private List<List<IncidentModel>> allIncidents = new List<List<IncidentModel>>();
-        private List<IncidentModel> aqiIncidents = new List<IncidentModel>();
-        internal DateTime lastExecutionTime = DateTime.MinValue;
+        private static Configurations _configurations;
+        private static List<AqiModel> dataList = new List<AqiModel>();
+        private static List<List<IncidentModel>> allIncidents = new List<List<IncidentModel>>();
+        private static List<IncidentModel> aqiIncidents = new List<IncidentModel>();
+        private static NpgsqlConnection connection;
+        internal static DateTime lastExecutionTime = DateTime.MinValue;
         int thresholdTime = 10;
-        int thresholdTemperature = 45;
-        private NpgsqlConnection connection;
+        int thresholdTemperature;
 
-        internal async Task dataConsumer(ConsumerConfig _config, IConfiguration _configuration, NpgsqlConnection _connection)
-        {
+        internal async Task start(ConsumerConfig _config, IConfiguration _configuration, NpgsqlConnection _connection) {
+            Console.WriteLine("AQI Consumer Started...");
             connection = _connection;
+            Console.WriteLine("Configuration Checking...");
+            checkConfiguration();
+            Console.WriteLine("Configuration Fetched Successfully...");
+            Console.WriteLine("Data Consuming Started...");
+            await dataConsumer(_config, _configuration);
+        }
+
+        private async Task dataConsumer(ConsumerConfig _config, IConfiguration _configuration)
+        {
             using (var consumer = new ConsumerBuilder<Ignore, string>(_config).Build())
             {
                 consumer.Subscribe(_configuration["BootstrapService:Topic"]);
@@ -59,27 +70,16 @@ namespace AQI_Consumer
             {
                 var groupedData = dataList.GroupBy(d => d.PollNumber);
 
-                Double minPM10 = dataList.Min(x => x.PM10);
-                Double maxPM10 = dataList.Max(x => x.PM10);
-
-
-
-                DateTime startTime = dataList.Min(d => DateTime.Parse(d.TimeStamp.ToString()));
-                DateTime endTime = dataList.Max(d => DateTime.Parse(d.TimeStamp.ToString()));
-
-
                 Console.Clear();
-                Console.WriteLine($"\nThreshold Time = {thresholdTime} seconds");
-                Console.WriteLine($"Threshold Speed = {thresholdTemperature} °C");
                 double averageSpeed = dataList.Average(d => d.Temperature);
-                Console.WriteLine($"Total Temperature Pools = {groupedData.Count()}\n");
-
                 List<IncidentModel> incidents = new List<IncidentModel>();
                 foreach (var group in groupedData)
                 {
-                    IncidentModel incident = new IncidentModel
+                    incidents.Add(new IncidentModel
                     {
                         PollNumber = group.Key,
+
+                        AQI = calculateOverallAQI(_configurations, group.Average(d => d.PM10), group.Average(d => d.PM2_5), group.Average(d => d.NO2), group.Average(d => d.O3), group.Average(d => d.CO), group.Average(d => d.SO2), group.Average(d => d.PM10), group.Average(d => d.PB)),
 
                         Min_PM10 = group.Min(d => d.PM10),
                         Max_PM10 = group.Max(d => d.PM10),
@@ -149,21 +149,20 @@ namespace AQI_Consumer
                         Max_Feelslike = group.Max(d => d.Feelslike),
                         Avg_Feelslike = group.Average(d => d.Feelslike),
 
+                        Area = group.Min(d => d.Area),
+                        City = group.Min(d => d.City),
+                        State = group.Min(d => d.State),
+
                         StartTime = group.Min(d => DateTime.Parse(d.TimeStamp.ToString())),
                         EndTime = group.Max(d => DateTime.Parse(d.TimeStamp.ToString())),
-                    };
-                    incidents.Add(incident);
+                    }) ;
                 }
 
-                allIncidents.Add(incidents);
-
-
-                PrintData(allIncidents[0]);
-
+                displayData(incidents);
 
                 dataList.Clear();
                 allIncidents.Clear();
-                //await checkConfiguration();
+                await checkConfiguration();
                 lastExecutionTime = DateTime.Now;
             }
         }
@@ -194,90 +193,154 @@ namespace AQI_Consumer
         //    }
         //}
 
-        //internal async Task checkConfiguration()
-        //{
-        //    using (NpgsqlCommand cmd = new NpgsqlCommand($"select * from configurations where configurationid=2 and isdeleted=false;", connection))
-        //    {
-        //        using (var reader = cmd.ExecuteReader())
-        //        {
-        //            if (reader.Read())
-        //            {
-        //                thresholdTemperature = reader.GetInt32(2);
-        //                thresholdTime = reader.GetInt32(3);
-        //            }
-        //        }
-
-        //    }
-        //}
-
-        public void PrintData(List<IncidentModel> incidents)
+        private async Task checkConfiguration()
         {
-            // Define the column headers and their respective widths
-            string[] headers = { "PollNumber", "PM10", "PM2.5", "NO2", "O3", "CO", "SO2", "NH3", "PB", "Temperature", "Wind", "Pressure", "Precip", "Visibility", "Humidity", "Uv", "Gust", "Feelslike", "StartTime", "EndTime" };
-            int[] widths = { 12, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20 };
-
-            // Print the top border
-            PrintLine(widths);
-
-            // Print the main headers
-            PrintRow(headers, widths);
-            PrintLine(widths);
-
-            // Print the sub headers
-            string[] subHeaders = new string[headers.Length];
-            subHeaders[0] = ""; // PollNumber has no sub-headers
-            for (int i = 1; i < subHeaders.Length - 2; i++) // -2 to skip StartTime and EndTime
+            if (_configurations == null)
             {
-                subHeaders[i] = "Min    Max    Avg";
+                _configurations = new Configurations();
             }
-            subHeaders[subHeaders.Length - 2] = ""; // StartTime has no sub-headers
-            subHeaders[subHeaders.Length - 1] = ""; // EndTime has no sub-headers
-            PrintRow(subHeaders, widths);
-            PrintLine(widths);
-
-            // Print the data rows
-            foreach (var incident in incidents)
+            using (NpgsqlCommand cmd = new NpgsqlCommand($"select * from getaqiconfigurations()", connection))
             {
-                PrintRow(new string[]
+                using (var reader = cmd.ExecuteReader())
                 {
-                    incident.PollNumber.ToString(),
-                    $"{incident.Min_PM10,-6}{incident.Max_PM10,-6}{incident.Avg_PM10,-6}",
-                    $"{incident.Min_PM2_5,-6}{incident.Max_PM2_5,-6}{incident.Avg_PM2_5,-6}",
-                    $"{incident.Min_NO2,-6}{incident.Max_NO2,-6}{incident.Avg_NO2,-6}",
-                    $"{incident.Min_O3,-6}{incident.Max_O3,-6}{incident.Avg_O3,-6}",
-                    $"{incident.Min_CO,-6}{incident.Max_CO,-6}{incident.Avg_CO,-6}",
-                    $"{incident.Min_SO2,-6}{incident.Max_SO2,-6}{incident.Avg_SO2,-6}",
-                    $"{incident.Min_NH3,-6}{incident.Max_NH3,-6}{incident.Avg_NH3,-6}",
-                    $"{incident.Min_PB,-6}{incident.Max_PB,-6}{incident.Avg_PB,-6}",
-                    $"{incident.Min_Temperature,-6}{incident.Max_Temperature,-6}{incident.Avg_Temperature,-6}",
-                    $"{incident.Min_Wind,-6}{incident.Max_Wind,-6}{incident.Avg_Wind,-6}",
-                    $"{incident.Min_Pressure,-6}{incident.Max_Pressure,-6}{incident.Avg_Pressure,-6}",
-                    $"{incident.Min_Precip,-6}{incident.Max_Precip,-6}{incident.Avg_Precip,-6}",
-                    $"{incident.Min_Visibility,-6}{incident.Max_Visibility,-6}{incident.Avg_Visibility,-6}",
-                    $"{incident.Min_Humidity,-6}{incident.Max_Humidity,-6}{incident.Avg_Humidity,-6}",
-                    $"{incident.Min_Uv,-6}{incident.Max_Uv,-6}{incident.Avg_Uv,-6}",
-                    $"{incident.Min_Gust,-6}{incident.Max_Gust,-6}{incident.Avg_Gust,-6}",
-                    $"{incident.Min_Feelslike,-6}{incident.Max_Feelslike,-6}{incident.Avg_Feelslike,-6}",
-                    incident.StartTime.ToString(),
-                    incident.EndTime.ToString()
-                }, widths);
-                PrintLine(widths);
+                    while (reader.Read())
+                    {
+                        _configurations.Categories.Add(reader.GetString(1));
+                        _configurations.PM10Breakpoints.Add(reader.GetDouble(2));
+                        _configurations.PM10Breakpoints.Add(reader.GetDouble(3));
+                        _configurations.PM25Breakpoints.Add(reader.GetDouble(4));
+                        _configurations.PM25Breakpoints.Add(reader.GetDouble(5));
+                        _configurations.NO2Breakpoints.Add(reader.GetDouble(6));
+                        _configurations.NO2Breakpoints.Add(reader.GetDouble(7));
+                        _configurations.O3Breakpoints.Add(reader.GetDouble(8));
+                        _configurations.O3Breakpoints.Add(reader.GetDouble(9));
+                        _configurations.COBreakpoints.Add(reader.GetDouble(10));
+                        _configurations.COBreakpoints.Add(reader.GetDouble(11));
+                        _configurations.SO2Breakpoints.Add(reader.GetDouble(12));
+                        _configurations.SO2Breakpoints.Add(reader.GetDouble(13));
+                        _configurations.NH3Breakpoints.Add(reader.GetDouble(14));
+                        _configurations.NH3Breakpoints.Add(reader.GetDouble(15));
+                        _configurations.PBBreakpoints.Add(reader.GetDouble(16));
+                        _configurations.PBBreakpoints.Add(reader.GetDouble(17));
+                    }
+                }
             }
-        }
 
-        static void PrintLine(int[] widths)
-        {
-            Console.WriteLine(new string('-', widths.Sum() + widths.Length + 1));
-        }
-
-        static void PrintRow(string[] columns, int[] widths)
-        {
-            string row = "|";
-            for (int i = 0; i < columns.Length; i++)
+            using (NpgsqlCommand cmd = new NpgsqlCommand($"select * from getaqicategoryrange()", connection))
             {
-                row += columns[i].PadRight(widths[i]) + "|";
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        _configurations.CategoriesRange.Add(reader.GetDouble(1));
+                    }
+                }
             }
-            Console.WriteLine(row);
+        }
+
+        private int calculateAQI(double concentration, List<double> breakpoints)
+        {
+            double AQI = 0;
+            for (int i = 0; i < breakpoints.Count - 1; i += 2)
+            {
+                if (concentration >= breakpoints[i] && concentration <= breakpoints[i + 1])
+                {
+                    AQI = (_configurations.CategoriesRange[i / 2 + 1] - _configurations.CategoriesRange[i / 2]) / (breakpoints[i + 1] - breakpoints[i]) * (concentration - breakpoints[i]) + _configurations.CategoriesRange[i / 2];
+                    break;
+                }
+            }
+            return (int)Math.Round(AQI);
+        }
+
+        private int calculateOverallAQI(Configurations _configuration, double _PM10, double _PM25, double _NO2, double _O3, double _CO, double _SO2, double _NH3, double _PB)
+        {
+            int aqiPM10 = calculateAQI(_PM10, _configuration.PM10Breakpoints);
+            int aqiPM25 = calculateAQI(_PM25, _configuration.PM25Breakpoints);
+            int aqiNO2 = calculateAQI(_NO2, _configuration.NO2Breakpoints);
+            int aqiO3 = calculateAQI(_O3, _configuration.O3Breakpoints);
+            int aqiCO = calculateAQI(_CO, _configuration.COBreakpoints);
+            int aqiSO2 = calculateAQI(_SO2, _configuration.SO2Breakpoints);
+            int aqiNH3 = calculateAQI(_NH3, _configuration.NH3Breakpoints);
+            int aqiPB = calculateAQI(_PB, _configuration.PBBreakpoints);
+
+            int overallAQI = Math.Max(aqiPM10, Math.Max(aqiPM25, Math.Max(aqiNO2, Math.Max(aqiO3, Math.Max(aqiCO, Math.Max(aqiSO2, Math.Max(aqiNH3, aqiPB)))))));
+
+            return overallAQI;
+        }
+
+        private void displayData(List<IncidentModel> _incidents)
+        {
+            Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine("------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+            Console.WriteLine($"| {"Poll Number",-15} | {"AQI",-15} | {"Category",-20} | {"Area",-20} | {"City",-20} | {"State",-20}| {"Start Time",-20} | {"End Time",-20} |");
+            Console.WriteLine("------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+            Console.ResetColor();
+            foreach (var i in _incidents)
+            {
+                Console.Write($"| {i.PollNumber,-15} | ");
+                Console.ForegroundColor = ConsoleColor.Black;
+                if (_configurations.CategoriesRange[1] > i.AQI && i.AQI >= _configurations.CategoriesRange[0])
+                {
+                    Console.BackgroundColor = ConsoleColor.DarkGreen;
+                }
+                 if (_configurations.CategoriesRange[2] > i.AQI && i.AQI >= _configurations.CategoriesRange[1])
+                {
+                    Console.BackgroundColor = ConsoleColor.Yellow;
+                }
+                 if (_configurations.CategoriesRange[3] > i.AQI && i.AQI >= _configurations.CategoriesRange[2])
+                {
+                    Console.BackgroundColor = ConsoleColor.DarkYellow;
+                }
+                 if (_configurations.CategoriesRange[4] > i.AQI && i.AQI >= _configurations.CategoriesRange[3])
+                {
+                    Console.BackgroundColor = ConsoleColor.Red;
+                }
+                 if (_configurations.CategoriesRange[5] > i.AQI && i.AQI >= _configurations.CategoriesRange[4])
+                {
+                    Console.BackgroundColor = ConsoleColor.DarkRed;
+                }
+                if (_configurations.CategoriesRange[5] <= i.AQI)
+                {
+                    Console.BackgroundColor = ConsoleColor.DarkMagenta;
+                }
+                Console.Write($"{i.AQI,-15} ");
+                Console.ResetColor();
+
+                Console.WriteLine($"| {category(i.AQI),-20} | {i.Area,-20} | {i.City,-20} | {i.State,-19} | {i.StartTime,-20} | {i.EndTime,-20} |");
+            }
+            Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine("------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+            Console.ResetColor();
+            Console.Write("Loading...");
+        }
+
+        private string category(double aqi)
+        {
+            if (_configurations.CategoriesRange[1] > aqi && aqi >= _configurations.CategoriesRange[0])
+            {
+                return _configurations.Categories[0];
+            }
+            if (_configurations.CategoriesRange[2] > aqi && aqi >= _configurations.CategoriesRange[1])
+            {
+                return _configurations.Categories[1];
+            }
+            if (_configurations.CategoriesRange[3] > aqi && aqi >= _configurations.CategoriesRange[2])
+            {
+                return _configurations.Categories[2];
+            }
+            if (_configurations.CategoriesRange[4] > aqi && aqi >= _configurations.CategoriesRange[3])
+            {
+                return _configurations.Categories[3];
+            }
+            if (_configurations.CategoriesRange[5] > aqi && aqi >= _configurations.CategoriesRange[4])
+            {
+                return _configurations.Categories[4];
+            }
+            if (_configurations.CategoriesRange[5] <= aqi)
+            {
+                return _configurations.Categories[5];
+            }
+            return "Not Found";
         }
     }
 }
